@@ -2,17 +2,12 @@
 
 (push #p"c:/dropbox/lisp/practicals-1.0.3/Chapter08/" asdf:*central-registry*)
 (push #p"c:/dropbox/lisp/practicals-1.0.3/Chapter24/" asdf:*central-registry*)
-(push #p"c:/dropbox/lisp/practicals-1.0.3/Chapter15/" asdf:*central-registry*)
 
 (asdf:oos 'asdf:load-op :binary-data)
-(asdf:oos 'asdf:load-op :pathnames)
-
-(ql:quickload "ieee-floats")
 
 (defpackage :sasxpt
   (:use :common-lisp
-        :com.gigamonkeys.binary-data
-        :com.gigamonkeys.pathnames))
+        :com.gigamonkeys.binary-data))
 
 (in-package :sasxpt)
 
@@ -38,9 +33,6 @@
   (let* ((sign (ldb (byte 1 63) bits))
          (exponent (ldb (byte 7 56) bits))
          (significand (ldb (byte 56 0) bits)))
-    ;; (format t "Bits: ~B~%" bits)
-    ;; (format t "Sign: ~a Exponent: ~a Significand: ~a~%" sign exponent significand)
-    ;; (format t "Sign: ~B~%Exponent: ~B~%Significand: ~B~%" sign exponent significand)
     (unless (zerop sign)
       (setf significand (- significand)))
     (* (scale-float (float significand) -56) (expt 16 (- exponent 64)))))
@@ -52,16 +44,12 @@
     (let ((significand (scale-float significand (nth-value 1 (ceiling exponent 4))))
           (exponent (+ (ceiling exponent 4) 64))
           (sign (if (= sign 1.0) 0 1)))
-      ;; (format t "Sign: ~a Exponent: ~a Significand: ~a~%" sign exponent significand)
       (setf significand (round (* (expt 2 56) significand)))
-      ;; (format t "Sign: ~a Exponent: ~a Significand: ~a~%" sign exponent significand)
-      ;; (format t "Sign: ~B~%Exponent: ~B~%Significand: ~B~%" sign exponent significand)
       (let ((bits 0))
         (declare (type (unsigned-byte 64) bits))
         (setf (ldb (byte 1 63) bits) sign
               (ldb (byte 7 56) bits) exponent
               (ldb (byte 56 0) bits) significand)
-        ;; (format t "Bits: ~B~%" bits)
         bits))))
 
 ;; (floating-point-to-u8 -1110023.23)
@@ -242,58 +230,48 @@
 (defmethod xpt-variables-number ((type sasxpt))
   (parse-integer (subseq (namestr-header-record (namestr-header type)) 54 58)))
 
-;; (defconstant +shsp+ 0 "sas header start positon")
-;; (defconstant +mhsp+ 240 "member header start positon")
-;; (defconstant +nhsp+ 560 "namestr header start positon")
-;; (defconstant +ndsp+ 640 "namestr data start postion")
-
-
 (defun read-xpt (file)
   (with-open-file (in file :element-type '(unsigned-byte 8))
     (read-value 'sasxpt in)))
 
-(defmethod print-object ((object sasxpt) stream)
-  (let ((default-width 8)
-        (var-widths (mapcar #'nlng (namestr-records (read-xpt "dm.xpt"))))
-        (var-names (mapcar #'nname (namestr-records (read-xpt "dm.xpt")))))
-    (format t "Variables:~%")
-    (format t "~v@{~A~:*~}~%" 93 "-")
-    (format t "~{|~{ ~{~Va|~}~}~%~}"
-            (mapcar #'(lambda (r)
-                        (mapcar #'(lambda (v)
-                                    (list default-width v)) r))
-                    (list (list "Variable" "Type" "Len" "Format" "InFormat" "Label                                   "))))
+(defun dash-line (length)
+  "Write dash line"
+  (format t "~v@{~A~:*~}~%" length "-"))
 
-    (format t "~v@{~A~:*~}~%" 93 "-")
+(defun calc-length (var-widths &optional (default-width 8))
+  (+ 1
+     (* (length var-widths) 2)
+     (reduce #'+ (mapcar #'(lambda (x) (max default-width x)) var-widths))))
+
+(defmethod print-object ((object sasxpt) stream)
+  (let* ((default-width 8)
+         (namestr-records (namestr-records object))
+         (var-widths (mapcar #'nlng namestr-records))
+         (var-names (mapcar #'nname namestr-records))
+         (var-names1 (list "Variable" "Type" "Len" "Format" "InFormat" "Label                                   ")))
+    (format t "Variables:~%")
+    (dash-line 93)
+    (format t "|~{ ~{~Va|~}~}~%" (mapcar #'(lambda (v) (list default-width v)) var-names1))
+
+    (dash-line 93)
     (format t "~{|~{ ~{~Va|~}~}~%~}"
-            (mapcar #'(lambda (r)
-                        (mapcar #'(lambda (v)
-                                    (list default-width v))
-                                (list (nname r) (ntype r) (nlng r) (nform r) (niform r) (nlabel r))))
-                    (namestr-records (read-xpt "dm.xpt"))))
-    (format t "~v@{~A~:*~}~%" 93 "-")
+            (mapcar #'(lambda (r) (mapcar #'(lambda (v) (list default-width v))
+                                          (list (nname r)
+                                                (if (eql 1 (ntype r)) "Num" "Char")
+                                                (nlng r) (nform r) (niform r) (nlabel r))))
+                    namestr-records))
+    (dash-line 93)
 
     (format t "~%OBS:~%")
-    (format t "~v@{~A~:*~}~%" (+ 1
-                                 (* (length var-widths) 2)
-                                 (reduce #'+ (mapcar #'(lambda (x) (max default-width x)) var-widths)))
-            "-")
+    (dash-line (calc-length var-widths))
     (format t "|~{ ~{~Va|~}~}~%" (mapcar #'(lambda (x y)
-                                                 (list (max x default-width) y)) var-widths var-names))
-    (format t "~v@{~A~:*~}~%" (+ 1
-                                 (* (length var-widths) 2)
-                                 (reduce #'+ (mapcar #'(lambda (x) (max default-width x)) var-widths)))
-            "-")
+                                             (list (max x default-width) y)) var-widths var-names))
+    (dash-line (calc-length var-widths))
     (format t "~{|~{ ~{~Va|~}~}~%~}"
-            (mapcar #'(lambda (r) (mapcar #'(lambda (v) (list default-width v)) r)) (obs-records (read-xpt "dm.xpt"))))
-    (format t "~v@{~A~:*~}~%" (+ 1
-                                 (* (length var-widths) 2)
-                                 (reduce #'+ (mapcar #'(lambda (x) (max default-width x)) var-widths)))
-            "-")
-    ))
+            (mapcar #'(lambda (r) (mapcar #'(lambda (v) (list default-width v)) r)) (obs-records object)))
+    (dash-line (calc-length var-widths))))
 
 
 ;; (read-xpt "dm.xpt")
-;; (print (obs-records (read-xpt "dm.xpt")))
 ;; (xpt-variables-number (read-xpt "dm.xpt"))
 
