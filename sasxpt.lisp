@@ -11,6 +11,8 @@
 
 (in-package :sasxpt)
 
+(declaim (optimize (debug 3)))
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; A few basic types
 
@@ -119,7 +121,7 @@
    (dscrptr-header-record (iso-8859-1-string :length 80)) ;HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!000000000000000000000000000000
    (sas-symbol (iso-8859-1-string :length 8))             ;specifies 'SAS     '
    (sas-dsname (iso-8859-1-string :length 8))             ;specifies the data set name
-   (sas-data (iso-8859-1-string :length 8))               ;is SASDATA
+   (sas-data (iso-8859-1-string :length 8))               ;is 'SASDATA '
    (sas-ver (iso-8859-1-string :length 8))                ;specifies the version of the SAS System under which the file was created.
    (sas-os (iso-8859-1-string :length 8))                 ;specifies the operating system. 
    (blanks-1 (iso-8859-1-string :length 24))              ;blanks
@@ -172,16 +174,20 @@
   ;; fall in the last byte of the 80-byte record, the record is padded with ASCII
   ;; blanks to 80 bytes.  
   (:reader (in)
-           (loop with to-read = no
+           (loop
+              with to-read = no
               while (plusp to-read)
               for namestr-rec = (read-value 'namestr-data in)
               while namestr-rec
               do (decf to-read)
               collect namestr-rec))
   (:writer (out namestr-recs)
-           (loop with to-write = no
+           (loop
+              with to-write = no
               for namestr-rec in namestr-recs
-              do (write-value 'namestr-data out namestr-rec)
+              do
+                (format t "Namestr-rec: ~a~%" to-write)
+                (write-value 'namestr-data out namestr-rec)
                 (decf to-write))))
 
 
@@ -211,9 +217,10 @@
                    for ntype in list-ntype
                    for nlng in list-nlng
                    do
-                     (if (eql ntype 1)
-                         (write-value 'u8 out (floating-point-to-u8 (nth (1- i) obs-record)))
-                         (write-value 'iso-8859-1-string out (nth (1- i) obs-record)))))))
+                     (let ((value (nth (1- i) obs-record)))
+                       (if (eql ntype 1)
+                           (write-value 'u8 out (floating-point-to-u8 value))
+                           (write-value 'iso-8859-1-string out value :length (length value))))))))
 
 (define-binary-class sasxpt ()
   ((xpt-header xpt-header)
@@ -275,3 +282,65 @@
 ;; (read-xpt "dm.xpt")
 ;; (xpt-variables-number (read-xpt "dm.xpt"))
 
+(defun xpt-datetime ()
+  "ddMMMyy:hh:mm:ss"
+  (multiple-value-bind (se mi ho da mo ye dw dst tz) (get-decoded-time)
+    (declare (ignore dw dst tz))
+    (format nil "~2,'0d~a~2,'0d:~2,'0d:~2,'0d:~2,'0d"
+            da (elt #("JAN" "FEB" "MAR" "APR" "MAY" "JUN" "JUL" "AUG" "SEP" "OCT" "NOV" "DEC") mo) (- ye 2000) ho mi se)))
+
+;; (xpt-datetime)
+  
+(defconstant *xpt-header-record* "HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!000000000000000000000000000000  ")
+(defconstant *member-header-record* "HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!000000000000000001600000000140  ")
+(defconstant *dscrptr-header-record* "HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!000000000000000000000000000000  ")
+(defconstant *namestr-header-record* "HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!000000~4,'0d00000000000000000000  ")
+
+
+(defun write-xpt (file sasxpt dsname dslabel)
+  (let* ((xpt-datetime (xpt-datetime))
+         ;; do not delete blanks between ""
+        (xpt-header (make-instance 'xpt-header
+                                   :xpt-header-record *xpt-header-record*
+                                   :sas-symbol-1 "SAS     "
+                                   :sas-symbol-2 "SAS     "
+                                   :sas-lib "SASLIB  "
+                                   :sas-ver "9.4     "
+                                   :sas-os "X64_7PRO"
+                                   :blanks-1 "                        "
+                                   :sas-create xpt-datetime
+                                   :sas-modify xpt-datetime
+                                   :blanks-2 "                                                                "))
+         (member-header (make-instance 'member-header
+                                       :member-header-record *member-header-record*
+                                       :dscrptr-header-record *dscrptr-header-record*
+                                       :sas-symbol "SAS     "
+                                       :sas-dsname (subseq (format nil "~8,a" dsname) 0 8)
+                                       :sas-data "SASDATA "
+                                       :sas-ver "9.4     "
+                                       :sas-os "X64_7PRO"
+                                       :blanks-1 "                        "
+                                       :sas-create xpt-datetime
+                                       :sas-modify xpt-datetime
+                                       :blanks-2 "                "
+                                       :dslabel (subseq (format nil "~40,a" dslabel) 0 40)
+                                       :dstype "        "))
+         (namestr-header (make-instance 'namestr-header
+                                        :namestr-header-record (format nil *namestr-header-record* 16)))
+         (obs-header (make-instance 'obs-header
+                                    :obs-header-record "HEADER RECORD*******OBS     HEADER RECORD!!!!!!!000000000000000000000000000000  ")))
+                                        
+    
+    (with-open-file (out file :element-type '(unsigned-byte 8) :direction :output :if-exists :supersede)
+      (write-value 'xpt-header out xpt-header)
+      (write-value 'member-header out member-header)
+      (write-value 'namestr-header out namestr-header)
+      (write-value 'namestr-records out (namestr-records sasxpt) :no (length (namestr-records sasxpt)))
+      (write-value 'obs-header out obs-header)
+      (write-value 'obs-records out (obs-records sasxpt)
+                   :obs-length (obs-length (namestr-records sasxpt))
+                   :variables-number (xpt-variables-number (namestr-header sasxpt))
+                   :list-ntype (mapcar #'ntype (namestr-records sasxpt))
+                   :list-nlng (mapcar #'nlng (namestr-records sasxpt))))))
+
+;; (write-xpt "dm01.xpt" (read-xpt "dm.xpt") "DM01" "Demographics")
