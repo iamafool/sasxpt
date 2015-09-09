@@ -29,6 +29,7 @@
 (define-binary-type u2 () (unsigned-integer :bytes 2 :bits-per-byte 8))
 (define-binary-type u4 () (unsigned-integer :bytes 4 :bits-per-byte 8))
 (define-binary-type u8 () (unsigned-integer :bytes 8 :bits-per-byte 8))
+(define-binary-type u52 () (unsigned-integer :bytes 52 :bits-per-byte 8))
 
 (defun u8-to-floating-point (bits)
   (declare (type (unsigned-byte 64) bits))
@@ -159,12 +160,12 @@
    (nfl u2)                                ;FORMAT FIELD LENGTH OR 0
    (nfd u2)                                ;FORMAT NUMBER OF DECIMALS
    (nfj u2)                                ;0=LEFT JUSTIFICATION, 1=RIGHT JUST
-   (nfill (iso-8859-1-string :length 2))   ;UNUSED, FOR ALIGNMENT AND FUTURE
+   (nfill u2)                              ;UNUSED, FOR ALIGNMENT AND FUTURE
    (niform (iso-8859-1-string :length 8))  ;NAME OF INPUT FORMAT
    (nifl u2)                               ;INFORMAT LENGTH ATTRIBUTE
    (nifd u2)                               ;INFORMAT NUMBER OF DECIMALS
    (npos u4)                               ;POSITION OF VALUE IN OBSERVATION
-   (padding (iso-8859-1-string :length 52)) ;remaining fields are irrelevant
+   (padding u52)                           ;remaining fields are irrelevant
    ))
 
 
@@ -186,7 +187,6 @@
               with to-write = no
               for namestr-rec in namestr-recs
               do
-                (format t "Namestr-rec: ~a~%" to-write)
                 (write-value 'namestr-data out namestr-rec)
                 (decf to-write))))
 
@@ -210,17 +210,22 @@
                                      (u8-to-floating-point (read-value 'u8 in))
                                      (read-value 'iso-8859-1-string in :length nlng)))))
   (:writer (out obs-records)
-           (loop for obs-record in obs-records
-              do
-                (loop
-                   for i from 1 to variables-number
-                   for ntype in list-ntype
-                   for nlng in list-nlng
-                   do
-                     (let ((value (nth (1- i) obs-record)))
-                       (if (eql ntype 1)
-                           (write-value 'u8 out (floating-point-to-u8 value))
-                           (write-value 'iso-8859-1-string out value :length (length value))))))))
+           (let* ((obs-no (length obs-records))
+                 (padding-no (- 80 (mod (* obs-no obs-length) 80))))
+             (loop for obs-record in obs-records
+                do
+                  (loop
+                     for i from 1 to variables-number
+                     for ntype in list-ntype
+                     for nlng in list-nlng
+                     do
+                       (let ((value (nth (1- i) obs-record)))
+                         (if (eql ntype 1)
+                             (write-value 'u8 out (floating-point-to-u8 value))
+                             (write-value 'iso-8859-1-string out value :length (length value))))))
+             (if (> padding-no 0)
+                 (write-value 'iso-8859-1-string out (format nil "~v,a" padding-no #\space) :length padding-no))
+             )))
 
 (define-binary-class sasxpt ()
   ((xpt-header xpt-header)
@@ -291,56 +296,135 @@
 
 ;; (xpt-datetime)
   
-(defconstant *xpt-header-record* "HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!000000000000000000000000000000  ")
-(defconstant *member-header-record* "HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!000000000000000001600000000140  ")
-(defconstant *dscrptr-header-record* "HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!000000000000000000000000000000  ")
-(defconstant *namestr-header-record* "HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!000000~4,'0d00000000000000000000  ")
+(defparameter *xpt-header-record* "HEADER RECORD*******LIBRARY HEADER RECORD!!!!!!!000000000000000000000000000000  ")
+(defparameter *member-header-record* "HEADER RECORD*******MEMBER  HEADER RECORD!!!!!!!000000000000000001600000000140  ")
+(defparameter *dscrptr-header-record* "HEADER RECORD*******DSCRPTR HEADER RECORD!!!!!!!000000000000000000000000000000  ")
+(defparameter *namestr-header-record* "HEADER RECORD*******NAMESTR HEADER RECORD!!!!!!!000000~4,'0d00000000000000000000  ")
 
+(defun xpt-header-instance (xpt-datetime)
+  (make-instance 'xpt-header
+                 :xpt-header-record *xpt-header-record*
+                 :sas-symbol-1 "SAS     "
+                 :sas-symbol-2 "SAS     "
+                 :sas-lib "SASLIB  "
+                 :sas-ver "9.4     "
+                 :sas-os "X64_7PRO"
+                 :blanks-1 "                        "
+                 :sas-create xpt-datetime
+                 :sas-modify xpt-datetime
+                 :blanks-2 "                                                                "))
 
-(defun write-xpt (file sasxpt dsname dslabel)
+(defun member-header-instance (dsname dslabel xpt-datetime)
+  (make-instance 'member-header
+                 :member-header-record *member-header-record*
+                 :dscrptr-header-record *dscrptr-header-record*
+                 :sas-symbol "SAS     "
+                 :sas-dsname (subseq (format nil "~8,a" dsname) 0 8)
+                 :sas-data "SASDATA "
+                 :sas-ver "9.4     "
+                 :sas-os "X64_7PRO"
+                 :blanks-1 "                        "
+                 :sas-create xpt-datetime
+                 :sas-modify xpt-datetime
+                 :blanks-2 "                "
+                 :dslabel (subseq (format nil "~40,a" dslabel) 0 40)
+                 :dstype "        "))
+
+(defun namestr-data-instance (nvar0 nname ntype nlng nform niform nlabel)
+  (let ((var-type (if (string= (string-upcase ntype) "CHAR") 2 1)))
+    (make-instance 'namestr-data
+                   :ntype var-type
+                   :nhfun 0
+                   :nlng nlng
+                   :nvar0 nvar0
+                   :nname (subseq (format nil "~8,a" nname) 0 8)
+                   :nlabel (subseq (format nil "~40,a" nlabel) 0 40)
+                   :nform (subseq (format nil "~8,a" nform) 0 8)
+                   :nfl (cond
+                          ((string= (subseq nform 0 1) "$") nlng)
+                          ;; ((= var-type 1) 8)
+                          (t 0))
+                   :nfd 0
+                   :nfj 0
+                   :nfill 0
+                   :niform (subseq (format nil "~8,a" niform) 0 8)
+                   :nifl (cond
+                          ((string= (subseq nform 0 1) "$") nlng)
+                          ;; ((= var-type 1) 8)
+                          (t 0))
+                   :nifd 0
+                   :npos 0
+                   :padding 0)))
+
+(defun adjust-npos (namestr-records)
+  "Please notice that namestr-records is modified."
+  (let ((list-nlng (mapcar #'nlng namestr-records)))
+    (loop
+       with sum = 0
+       for namestr-record in namestr-records
+       for i in list-nlng
+       do
+         (setf (npos namestr-record) sum)
+         (incf sum i))))
+
+;; (inspect (namestr-data-instance 1 "AGE" "num" 8 "" "" "Age"))
+                   
+
+(defun write-xpt (file dsname dslabel namestr-records obs-records)
   (let* ((xpt-datetime (xpt-datetime))
-         ;; do not delete blanks between ""
-        (xpt-header (make-instance 'xpt-header
-                                   :xpt-header-record *xpt-header-record*
-                                   :sas-symbol-1 "SAS     "
-                                   :sas-symbol-2 "SAS     "
-                                   :sas-lib "SASLIB  "
-                                   :sas-ver "9.4     "
-                                   :sas-os "X64_7PRO"
-                                   :blanks-1 "                        "
-                                   :sas-create xpt-datetime
-                                   :sas-modify xpt-datetime
-                                   :blanks-2 "                                                                "))
-         (member-header (make-instance 'member-header
-                                       :member-header-record *member-header-record*
-                                       :dscrptr-header-record *dscrptr-header-record*
-                                       :sas-symbol "SAS     "
-                                       :sas-dsname (subseq (format nil "~8,a" dsname) 0 8)
-                                       :sas-data "SASDATA "
-                                       :sas-ver "9.4     "
-                                       :sas-os "X64_7PRO"
-                                       :blanks-1 "                        "
-                                       :sas-create xpt-datetime
-                                       :sas-modify xpt-datetime
-                                       :blanks-2 "                "
-                                       :dslabel (subseq (format nil "~40,a" dslabel) 0 40)
-                                       :dstype "        "))
+         (xpt-header (xpt-header-instance xpt-datetime))
+         (member-header (member-header-instance dsname dslabel xpt-datetime))
          (namestr-header (make-instance 'namestr-header
                                         :namestr-header-record (format nil *namestr-header-record* 16)))
          (obs-header (make-instance 'obs-header
                                     :obs-header-record "HEADER RECORD*******OBS     HEADER RECORD!!!!!!!000000000000000000000000000000  ")))
                                         
-    
     (with-open-file (out file :element-type '(unsigned-byte 8) :direction :output :if-exists :supersede)
       (write-value 'xpt-header out xpt-header)
       (write-value 'member-header out member-header)
       (write-value 'namestr-header out namestr-header)
-      (write-value 'namestr-records out (namestr-records sasxpt) :no (length (namestr-records sasxpt)))
+      (write-value 'namestr-records out namestr-records :no (length namestr-records))
       (write-value 'obs-header out obs-header)
-      (write-value 'obs-records out (obs-records sasxpt)
-                   :obs-length (obs-length (namestr-records sasxpt))
-                   :variables-number (xpt-variables-number (namestr-header sasxpt))
-                   :list-ntype (mapcar #'ntype (namestr-records sasxpt))
-                   :list-nlng (mapcar #'nlng (namestr-records sasxpt))))))
+      (write-value 'obs-records out obs-records
+                   :obs-length (obs-length namestr-records)
+                   :variables-number (xpt-variables-number namestr-header)
+                   :list-ntype (mapcar #'ntype namestr-records)
+                   :list-nlng (mapcar #'nlng namestr-records))
+      )))
 
-;; (write-xpt "dm01.xpt" (read-xpt "dm.xpt") "DM01" "Demographics")
+(let ((n-recs (list
+               (namestr-data-instance 1 "STUDYID" "Char" 7	"$" "$" "Study Identifier")
+               (namestr-data-instance 2 "DOMAIN" "Char" 2 "$" "$" "Domain Abbreviation")
+               (namestr-data-instance 3 "USUBJID" "Char" 14 "$" "$" "Unique Subject Identifier")
+               (namestr-data-instance 4 "SUBJID" "Char" 6 "$" "$" "Subject Identifier for the Study")
+               (namestr-data-instance 5 "RFSTDTC" "Char" 10 "$" "$" "Subject Reference Start Date/Time")
+               (namestr-data-instance 6 "RFENDTC" "Char" 10 "$" "$" "Subject Reference End Date/Time")
+               (namestr-data-instance 7 "SITEID" "Char" 3 "$" "$" "Study Site Identifier")
+               (namestr-data-instance 8 "BRTHDTC" "Char" 10 "$" "$" "Date/Time of Birth")
+               (namestr-data-instance 9 "AGE" "Num" 8 " " " " "Age")
+               (namestr-data-instance 10 "AGEU" "Char" 5 "$" "$" "Age Units")
+               (namestr-data-instance 11 "SEX" "Char" 1 "$" "$" "Sex")
+               (namestr-data-instance 12 "RACE" "Char" 40 "$" "$" "Race")
+               (namestr-data-instance 13 "ETHNIC" "Char" 22 "$" "$" "Ethnicity")
+               (namestr-data-instance 14 "ARMCD" "Char" 8 "$" "$" "Planned Arm Code")
+               (namestr-data-instance 15 "ARM" "Char" 20 "$" "" "Description of Planned Arm")
+               (namestr-data-instance 16 "COUNTRY" "Char" 3 "$" "$" "Country")
+               ))
+      (o-recs '(("CDISC01" "DM" "CDISC01.100008" "100008" "2003-04-29" "2003-10-12" "100"
+                 "1930-08-05" 72.0 "YEARS" "M" "OTHER                                   "
+                 "NOT HISPANIC OR LATINO" "WONDER10" "Miracle Drug 10 mg  " "USA")
+                ("CDISC01" "DM" "CDISC01.100014" "100014" "2003-10-15" "2004-03-29" "100"
+                 "1936-11-01" 66.0 "YEARS" "F" "WHITE                                   "
+                 "NOT HISPANIC OR LATINO" "WONDER20" "Miracle Drug 20 mg  " "USA")
+                ("CDISC01" "DM" "CDISC01.200001" "200001" "2003-09-30" "2004-02-02" "200"
+                 "1923-09-03" 80.0 "YEARS" "F" "MULTIPLE                                "
+                 "NOT HISPANIC OR LATINO" "PLACEBO " "Placebo             " "USA")
+                ("CDISC01" "DM" "CDISC01.200002" "200002" "2003-10-10" "2004-03-28" "200"
+                 "1933-07-22" 70.0 "YEARS" "F" "BLACK OR AFRICAN AMERICAN               "
+                 "NOT HISPANIC OR LATINO" "WONDER10" "Miracle Drug 10 mg  " "USA")
+                ("CDISC01" "DM" "CDISC01.200005" "200005" "          " "          " "200"
+                 "1937-02-22" 66.0 "YEARS" "F" "WHITE                                   "
+                 "NOT HISPANIC OR LATINO" "SCRNFAIL" "Screen Failure      " "USA"))))
+  (adjust-npos n-recs)
+  (write-xpt "dm01.xpt"  "DM01" "Demographics" n-recs o-recs))
+
