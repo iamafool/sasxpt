@@ -13,6 +13,8 @@
 
 (declaim (optimize (debug 3)))
 
+(defparameter *sas-xpt-ef* :default)
+
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ;;; A few basic types
 
@@ -70,6 +72,18 @@
            (dotimes (i length)
              (write-value character-type out (char string i)))))
 
+
+(define-binary-type generic-string-external-format (length external-format)
+  (:reader (in)
+           (let ((string (make-array length :element-type '(unsigned-byte 8))))
+             ;; (format t "file position is ~x.~%" (file-position in))
+             (read-sequence string in)
+             (sb-ext::octets-to-string string :external-format external-format)))
+  (:writer (out string)
+           (write-sequence (subseq (sb-ext::string-to-octets
+                                    (format nil "~v,a" length string)
+                                    :external-format external-format) 0 length) out)))
+
 (define-binary-type generic-terminated-string (terminator character-type)
   (:reader (in)
            (with-output-to-string (s)
@@ -98,6 +112,7 @@
 
 (define-binary-type iso-8859-1-terminated-string (terminator)
   (generic-terminated-string :terminator terminator :character-type 'iso-8859-1-char))
+
 
 
 ;; XPT
@@ -129,7 +144,7 @@
    (sas-create (iso-8859-1-string :length 16))            ;the datetime created
    (sas-modify (iso-8859-1-string :length 16))            ;the datetime modified
    (blanks-2 (iso-8859-1-string :length 16))              ;blanks
-   (dslabel (iso-8859-1-string :length 40))               ;a blank-padded data set label 
+   (dslabel (generic-string-external-format :length 40 :external-format *sas-xpt-ef*))               ;a blank-padded data set label 
    (dstype (iso-8859-1-string :length 8))                 ;the blank-padded data set type
    ))
 
@@ -155,7 +170,7 @@
    (nlng u2)                            ;LENGTH OF VARIABLE IN OBSERVATION
    (nvar0 u2)                           ;VARNUM
    (nname (iso-8859-1-string :length 8)) ;NAME OF VARIABLE
-   (nlabel (iso-8859-1-string :length 40)) ;LABEL OF VARIABLE
+   (nlabel (generic-string-external-format :length 40 :external-format *sas-xpt-ef*)) ;LABEL OF VARIABLE
    (nform (iso-8859-1-string :length 8))   ;NAME OF FORMAT
    (nfl u2)                                ;FORMAT FIELD LENGTH OR 0
    (nfd u2)                                ;FORMAT NUMBER OF DECIMALS
@@ -175,20 +190,31 @@
   ;; fall in the last byte of the 80-byte record, the record is padded with ASCII
   ;; blanks to 80 bytes.  
   (:reader (in)
-           (loop
-              with to-read = no
-              while (plusp to-read)
-              for namestr-rec = (read-value 'namestr-data in)
-              while namestr-rec
-              do (decf to-read)
-              collect namestr-rec))
+           ;; (format t "namestr-records start: ~a~%" (file-position in))
+           (let ((padding-no (- 80 (mod (+ (file-position in) (* 140 no)) 80)))
+                 (value-return (loop
+                            with to-read = no
+                            while (plusp to-read)
+                            for namestr-rec = (read-value 'namestr-data in)
+                            while namestr-rec
+                            do (decf to-read)
+                            collect namestr-rec)))
+             (if (< 0 padding-no 80)
+                 (read-value 'iso-8859-1-string in :length padding-no))
+             value-return))
   (:writer (out namestr-recs)
-           (loop
-              with to-write = no
-              for namestr-rec in namestr-recs
-              do
-                (write-value 'namestr-data out namestr-rec)
-                (decf to-write))))
+           (let ((padding-no (- 80 (mod (+ (file-position out) (* 140 no)) 80))))
+             (loop
+                with to-write = no
+                for namestr-rec in namestr-recs
+                do
+                  (write-value 'namestr-data out namestr-rec)
+                  (decf to-write))
+             (if (< 0 padding-no 80)
+                 (write-value 'iso-8859-1-string
+                              out
+                              (format nil "~v,a" padding-no #\space)
+                              :length padding-no)))))
 
 
 (defun obs-length (namestr-records)
@@ -201,14 +227,16 @@
   ;; Data records are streamed in the same way that namestrs are. There is ASCII blank padding at 
   ;; the end of the last record if necessary. There is no special trailing record.
   (:reader (in)
-           (loop while (>= (- (file-length in) (file-position in)) obs-length)
-              collect (loop
-                         for i from 1 to variables-number
-                         for ntype in list-ntype 
-                         for nlng in list-nlng
-                         collect (if (eql ntype 1)
-                                     (u8-to-floating-point (read-value 'u8 in))
-                                     (read-value 'iso-8859-1-string in :length nlng)))))
+           (let ((file-length-1 (file-length in)))
+             (loop while (or (and (>= obs-length 80) (>= (- file-length-1 (file-position in)) obs-length))
+                             (and (< obs-length 80) (> (- file-length-1 (file-position in)) obs-length))) ;todo
+                collect (loop
+                           for i from 1 to variables-number
+                           for ntype in list-ntype 
+                           for nlng in list-nlng
+                           collect (if (eql ntype 1)
+                                       (u8-to-floating-point (read-value 'u8 in))
+                                       (read-value 'generic-string-external-format in :length nlng :external-format *sas-xpt-ef*))))))
   (:writer (out obs-records)
            (let* ((obs-no (length obs-records))
                  (padding-no (- 80 (mod (* obs-no obs-length) 80))))
@@ -222,7 +250,7 @@
                        (let ((value (nth (1- i) obs-record)))
                          (if (eql ntype 1)
                              (write-value 'u8 out (floating-point-to-u8 value))
-                             (write-value 'iso-8859-1-string out value :length (length value))))))
+                             (write-value 'generic-string-external-format out value :length nlng :external-format *sas-xpt-ef*)))))
              (if (> padding-no 0)
                  (write-value 'iso-8859-1-string out (format nil "~v,a" padding-no #\space) :length padding-no))
              )))
@@ -243,7 +271,8 @@
   (parse-integer (subseq (namestr-header-record (namestr-header type)) 54 58)))
 
 (defun read-xpt (file)
-  (with-open-file (in file :element-type '(unsigned-byte 8))
+  ;; (with-open-file (in file :element-type '(unsigned-byte 8))
+  (with-open-file (in file :element-type '(unsigned-byte 8) :external-format :gbk)
     (read-value 'sasxpt in)))
 
 (defun dash-line (length)
@@ -375,7 +404,7 @@
          (xpt-header (xpt-header-instance xpt-datetime))
          (member-header (member-header-instance dsname dslabel xpt-datetime))
          (namestr-header (make-instance 'namestr-header
-                                        :namestr-header-record (format nil *namestr-header-record* 16)))
+                                        :namestr-header-record (format nil *namestr-header-record* (length namestr-records))))
          (obs-header (make-instance 'obs-header
                                     :obs-header-record "HEADER RECORD*******OBS     HEADER RECORD!!!!!!!000000000000000000000000000000  ")))
                                         
@@ -391,40 +420,4 @@
                    :list-ntype (mapcar #'ntype namestr-records)
                    :list-nlng (mapcar #'nlng namestr-records))
       )))
-
-(let ((n-recs (list
-               (namestr-data-instance 1 "STUDYID" "Char" 7	"$" "$" "Study Identifier")
-               (namestr-data-instance 2 "DOMAIN" "Char" 2 "$" "$" "Domain Abbreviation")
-               (namestr-data-instance 3 "USUBJID" "Char" 14 "$" "$" "Unique Subject Identifier")
-               (namestr-data-instance 4 "SUBJID" "Char" 6 "$" "$" "Subject Identifier for the Study")
-               (namestr-data-instance 5 "RFSTDTC" "Char" 10 "$" "$" "Subject Reference Start Date/Time")
-               (namestr-data-instance 6 "RFENDTC" "Char" 10 "$" "$" "Subject Reference End Date/Time")
-               (namestr-data-instance 7 "SITEID" "Char" 3 "$" "$" "Study Site Identifier")
-               (namestr-data-instance 8 "BRTHDTC" "Char" 10 "$" "$" "Date/Time of Birth")
-               (namestr-data-instance 9 "AGE" "Num" 8 " " " " "Age")
-               (namestr-data-instance 10 "AGEU" "Char" 5 "$" "$" "Age Units")
-               (namestr-data-instance 11 "SEX" "Char" 1 "$" "$" "Sex")
-               (namestr-data-instance 12 "RACE" "Char" 40 "$" "$" "Race")
-               (namestr-data-instance 13 "ETHNIC" "Char" 22 "$" "$" "Ethnicity")
-               (namestr-data-instance 14 "ARMCD" "Char" 8 "$" "$" "Planned Arm Code")
-               (namestr-data-instance 15 "ARM" "Char" 20 "$" "" "Description of Planned Arm")
-               (namestr-data-instance 16 "COUNTRY" "Char" 3 "$" "$" "Country")
-               ))
-      (o-recs '(("CDISC01" "DM" "CDISC01.100008" "100008" "2003-04-29" "2003-10-12" "100"
-                 "1930-08-05" 72.0 "YEARS" "M" "OTHER                                   "
-                 "NOT HISPANIC OR LATINO" "WONDER10" "Miracle Drug 10 mg  " "USA")
-                ("CDISC01" "DM" "CDISC01.100014" "100014" "2003-10-15" "2004-03-29" "100"
-                 "1936-11-01" 66.0 "YEARS" "F" "WHITE                                   "
-                 "NOT HISPANIC OR LATINO" "WONDER20" "Miracle Drug 20 mg  " "USA")
-                ("CDISC01" "DM" "CDISC01.200001" "200001" "2003-09-30" "2004-02-02" "200"
-                 "1923-09-03" 80.0 "YEARS" "F" "MULTIPLE                                "
-                 "NOT HISPANIC OR LATINO" "PLACEBO " "Placebo             " "USA")
-                ("CDISC01" "DM" "CDISC01.200002" "200002" "2003-10-10" "2004-03-28" "200"
-                 "1933-07-22" 70.0 "YEARS" "F" "BLACK OR AFRICAN AMERICAN               "
-                 "NOT HISPANIC OR LATINO" "WONDER10" "Miracle Drug 10 mg  " "USA")
-                ("CDISC01" "DM" "CDISC01.200005" "200005" "          " "          " "200"
-                 "1937-02-22" 66.0 "YEARS" "F" "WHITE                                   "
-                 "NOT HISPANIC OR LATINO" "SCRNFAIL" "Screen Failure      " "USA"))))
-  (adjust-npos n-recs)
-  (write-xpt "dm01.xpt"  "DM01" "Demographics" n-recs o-recs))
 
